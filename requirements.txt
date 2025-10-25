@@ -1,0 +1,18 @@
+fastapi>=0.95.0
+uvicorn[standard]>=0.22.0
+httpx>=0.24.0
+trafilatura>=1.6.0
+beautifulsoup4>=4.12.2
+nltk>=3.8.1
+rake-nltk>=1.0.4
+sumy>=0.10.0
+yake>=0.4.8
+langdetect>=1.0.9
+pydantic>=2.1.1
+pydantic-settings>=0.1.4
+pytest>=7.4.0
+pytest-asyncio>=0.22.0
+
+# Optional / extras
+# lxml may speed up BeautifulSoup and XML parsing
+lxml>=4.9.3
