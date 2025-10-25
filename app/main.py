@@ -13,6 +13,11 @@ from fastapi import FastAPI, HTTPException, Request, Response, Depends
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
+from fastapi.middleware.cors import CORSMiddleware
+try:
+    from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
+except Exception:  # pragma: no cover - optional dependency
+    ProxyHeadersMiddleware = None
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.staticfiles import StaticFiles
 from pydantic import AnyHttpUrl
@@ -83,7 +88,7 @@ publication date, lead image, language, summary, keywords and sentiment.
 
 Example cURL:
 
-    curl -X POST 'http://localhost:8000/v1/parse' \
+    curl -X POST 'https://txtr-api.onrender.com/v1/parse' \
       -H 'Content-Type: application/json' \
       -d '{"url":"https://en.wikipedia.org/wiki/Artificial_intelligence"}'
 
@@ -446,15 +451,44 @@ app.add_middleware(SecurityMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(BodySizeLimit, max_bytes=16_384)
 
+# Minimal, permissive CORS (tighten before production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["ETag", "X-Request-ID"],
+)
+
+# Respect proxy headers (e.g. X-Forwarded-Host, X-Forwarded-Proto) behind proxies like Render
+if ProxyHeadersMiddleware is not None:
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
 
 # Custom OpenAPI generation
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
-    openapi_schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
-    openapi_schema["servers"] = [{"url": "http://localhost:8000", "description": "Local"}]
-    openapi_schema.setdefault("components", {}).setdefault("securitySchemes", {})["ApiKeyHeader"] = {"type": "apiKey", "in": "header", "name": "X-API-Key"}
-    app.openapi_schema = openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    # Render sets RENDER_EXTERNAL_URL (https://<your-app>.onrender.com)
+    external = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("EXTERNAL_BASE_URL")
+    if external:
+        schema["servers"] = [{"url": external}]
+    else:
+        # Let Swagger use same-origin by not setting servers at all
+        schema.pop("servers", None)
+
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})["ApiKeyHeader"] = {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+    }
+    app.openapi_schema = schema
     return app.openapi_schema
 
 
