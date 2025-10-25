@@ -1,0 +1,4 @@
+.topbar { background: #0f172a !important; } /* dark header */
+.topbar a span { background: url('/static/logo.svg') no-repeat left center; padding-left: 44px; }
+.swagger-ui .info { max-width: 1100px; }
+.swagger-ui .markdown p code { background: #f1f5f9; padding: 0.1rem 0.35rem; border-radius: 4px; }
