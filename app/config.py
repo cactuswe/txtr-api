@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # Cache settings
     cache_ttl_s: Annotated[int, Field(ge=0)] = Field(default=600)
 
+    # RapidAPI enforcement
+    rapidapi_enforce: bool = Field(default=False)
+    rapidapi_proxy_secret: str = Field(default="")
+    rapidapi_host: str = Field(default="")
+    failsafe_rpm: Annotated[int, Field(gt=0)] = Field(default=1000)
+
     # Rate limiting
     rate_limit_per_min: Annotated[int, Field(gt=0)] = Field(default=60)
 

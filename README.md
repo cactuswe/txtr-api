@@ -119,3 +119,22 @@ Format code:
 black .
 ruff check --fix .
 ```
+
+## RapidAPI-only access
+
+This deployment can be configured to accept requests only via the RapidAPI proxy. When enabled, the service enforces that requests include RapidAPI headers and a proxy secret. Configuration is done via environment variables (see `.env.example`).
+
+Behavior when RAPIDAPI_ENFORCE=true:
+- All requests must include `X-RapidAPI-Key` header (401 if missing).
+- Requests must include `X-RapidAPI-Proxy-Secret` matching `RAPIDAPI_PROXY_SECRET` (403 if incorrect or missing).
+- If `RAPIDAPI_HOST` is set, `X-RapidAPI-Host` must match (403 if mismatch).
+- Direct requests to the server without Rapid headers will be rejected with 403.
+
+Plan-based behaviour:
+- Requests carrying RapidAPI plan headers (e.g. `X-RapidAPI-Plan` or `X-RapidAPI-Subscription`) with the string `free` will have reduced enrichment limits (top_k=8, max_chars=3000).
+- Pro/Business plans use higher limits (top_k=12, default max chars from settings).
+
+Logging:
+- Structured logs include `rapid_user`, `rapid_plan` and `rapid_host` when available.
+
+To enable RapidAPI-only access, copy `.env.example` to `.env` and set `RAPIDAPI_ENFORCE=true`, `RAPIDAPI_PROXY_SECRET`, and `RAPIDAPI_HOST` as appropriate.

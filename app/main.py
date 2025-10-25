@@ -59,11 +59,15 @@ from .models import (
 from .config import settings
 
 # Basic settings
+# Use settings.rate_limit_per_min for normal behavior; the failsafe limiter uses settings.failsafe_rpm
 RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "10"))
 CACHE_DIR = os.getenv("CACHE_DIR", "./data/cache")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 DEFAULT_CACHE_TTL_SECONDS = int(os.getenv("DEFAULT_CACHE_TTL_SECONDS", "600"))
 PARSER_VERSION = "v1"
+
+# Failsafe RPM from settings
+FAILSAFE_RPM = getattr(settings, "failsafe_rpm", 1000)
 
 # Error Responses (structured)
 error_responses = {
@@ -114,6 +118,8 @@ start_time = time.time()
 
 # in-memory token bucket for simple rate limiting
 _BUCKET: dict[str, tuple[float, float]] = {}
+# Make failsafe limiter permissive (higher than RapidAPI limits)
+RATE_LIMIT_PER_MIN = FAILSAFE_RPM
 BURST = max(5, RATE_LIMIT_PER_MIN // 2)
 
 
@@ -156,8 +162,42 @@ def _enforce_cache_budget() -> None:
         pass
 
 
+# RapidAPI helpers
+def get_rapid_plan(request: Request) -> str:
+    """Extract plan (lowercased) from RapidAPI headers."""
+    for h in ("X-RapidAPI-Subscription", "X-RapidAPI-Plan"):
+        v = request.headers.get(h)
+        if v:
+            return v.lower()
+    return "unknown"
+
+
+class RapidAPIEnforceMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not getattr(settings, "rapidapi_enforce", False):
+            return await call_next(request)
+
+        # Require proxy secret
+        secret = request.headers.get("X-RapidAPI-Proxy-Secret")
+        if not secret or secret != getattr(settings, "rapidapi_proxy_secret", ""):
+            return JSONResponse(status_code=403, content={"error": {"type": "forbidden", "message": "access denied", "status": 403}})
+
+        # Require RapidAPI key
+        if not request.headers.get("X-RapidAPI-Key"):
+            return JSONResponse(status_code=401, content={"error": {"type": "unauthorized", "message": "missing rapidapi key", "status": 401}})
+
+        # If configured, require host match
+        expected_host = getattr(settings, "rapidapi_host", "")
+        if expected_host:
+            host = request.headers.get("X-RapidAPI-Host", "")
+            if not host or host.lower() != expected_host.lower():
+                return JSONResponse(status_code=403, content={"error": {"type": "forbidden", "message": "invalid rapidapi host", "status": 403}})
+
+        return await call_next(request)
+
+
 # Core parse orchestrator
-async def core_parse(url_str: str) -> dict[str, Any]:
+async def core_parse(url_str: str, request: Request) -> dict[str, Any]:
     start = time.perf_counter()
 
     html, headers = await fetch_html(
@@ -181,12 +221,20 @@ async def core_parse(url_str: str) -> dict[str, Any]:
     published_at, published_sources = extract_published_at(html)
     site = extract_site_name(html, url_str)
 
-    max_chars = int(os.getenv("MAX_ENRICH_CHARS", "6000"))
+    # Plan-based behavior using RapidAPI headers
+    plan = get_rapid_plan(request)
+    if "free" in plan:
+        top_k = 8
+        max_chars = 3000
+    else:
+        top_k = 12
+        max_chars = getattr(settings, "max_enrich_chars", 8000)
+
     enrich_text = text[:max_chars] if len(text) > max_chars else text
 
     language = enrich.detect_language(enrich_text)
     summary = enrich.summarize_text(enrich_text) or ""
-    keywords = extract_keywords(enrich_text, top_k=12)
+    keywords = extract_keywords(enrich_text, top_k=top_k)
     sentiment = enrich.analyze_sentiment(summary or text[:3000])
 
     payload = {
@@ -311,7 +359,7 @@ async def parse(req: ParseRequest, request: Request):
         headers = _cache_headers(cached.etag, DEFAULT_CACHE_TTL_SECONDS)
         return JSONResponse(content=payload, headers=headers)
 
-    result = await core_parse(url_str)
+    result = await core_parse(url_str, request)
     payload = jsonable_encoder(result)
 
     _enforce_cache_budget()
@@ -421,6 +469,10 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             response.headers.setdefault("X-Request-ID", request_id)
         except Exception:
             pass
+        # Include RapidAPI headers in logs if present
+        rapid_user = request.headers.get("X-RapidAPI-User", "-")
+        rapid_plan = get_rapid_plan(request)
+        rapid_host = request.headers.get("X-RapidAPI-Host", "-")
         print(json.dumps({
             "ts": int(time.time()),
             "rid": request_id,
@@ -431,6 +483,9 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             "lat_ms": elapsed_ms(start),
             "user_agent": request.headers.get("user-agent", "-"),
             "referer": request.headers.get("referer", "-"),
+            "rapid_user": rapid_user,
+            "rapid_plan": rapid_plan,
+            "rapid_host": rapid_host,
         }))
         return response
 
@@ -448,17 +503,18 @@ class BodySizeLimit(BaseHTTPMiddleware):
 
 
 app.add_middleware(SecurityMiddleware)
+app.add_middleware(RapidAPIEnforceMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(BodySizeLimit, max_bytes=16_384)
-
-# Minimal, permissive CORS (tighten before production)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["ETag", "X-Request-ID"],
-)
+# CORS is disabled by default. If you need to allow only RapidAPI origins,
+# uncomment and adjust the block below:
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["https://example-rapidapi-origin.com"],
+#     allow_methods=["POST", "GET", "OPTIONS"],
+#     allow_headers=["*"],
+#     expose_headers=["ETag", "X-Request-ID"],
+# )
 
 # Respect proxy headers (e.g. X-Forwarded-Host, X-Forwarded-Proto) behind proxies like Render
 if ProxyHeadersMiddleware is not None:
